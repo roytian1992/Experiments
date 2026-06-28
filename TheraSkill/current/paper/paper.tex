@@ -1,0 +1,215 @@
+\documentclass[11pt]{article}
+
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage[margin=1in]{geometry}
+\usepackage[numbers,sort&compress]{natbib}
+
+\graphicspath{{figures/}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+
+\title{TheraSkill: Structuring Therapeutic Process Knowledge for Practitioner-Facing Mental-Health Copilots}
+
+\author{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Large language models are increasingly used to build counseling assistants and practitioner-facing mental-health copilots, but adapting a model with counseling dialogue data does not make therapeutic process knowledge transparent. Fine-tuned systems may become more fluent or empathic while still hiding how they choose between validation, clarification, psychoeducation, cognitive change, behavioral planning, interpersonal work, or safety stabilization. This opacity is especially problematic for clinical education and practitioner decision support, where action selection must be inspectable, updateable, and portable across model providers. We introduce \textbf{TheraSkill}, a model-agnostic therapeutic skill library designed to serve as an auditable action layer for a Hermes-based practitioner copilot. From 332,605 counseling and supportive-dialogue cases, we construct 52,070 skill cards organized into 2,245 skill-type nodes and nine operational therapeutic action categories. The construction pipeline combines eligibility screening, embedding-based diversity sampling, process-rule extraction, LLM-based quality adjudication, category-aware merge and deduplication, and skill-type tree organization. We further prepare a 500-scenario evaluation set for testing whether a practitioner copilot can select appropriate skill bundles from realistic client and case descriptions. The current manuscript reports the library construction, Hermes-oriented runtime design, and planned evaluation protocol; formal retrieval experiments, deployed copilot experiments, and clinical outcome claims remain outside the present evidence.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models (LLMs) are becoming part of mental-health support systems, counseling assistants, and practitioner-facing copilots \citep{stade2024opportunities,nguyen2025counselingbench}. Many current systems try to improve psychological support by adapting model behavior with counseling or supportive-dialogue data \citep{chen2023soulchat,qiu2024smile,zhang2024cpsycoun,xie2025psydt}. This direction is valuable, but it creates an urgent methodological problem. In practitioner decision support and clinical education, the quality of a suggestion depends not only on surface fluency or empathy, but also on the therapeutic action it asks a clinician or trainee to consider. A suggestion may sound warm while prematurely advising, missing a safety cue, over-pathologizing ordinary distress, or applying cognitive reframing when validation and clarification are needed first.
+
+This problem is hard to address when therapeutic process knowledge is stored mainly in model parameters or judged only through final responses. Fine-tuning can improve style, empathy, and instruction following, but the resulting action selection remains difficult to inspect, update, or transfer across model providers. It also creates practical barriers: model adaptation requires training infrastructure, repeated alignment and evaluation runs, provider-specific deployment paths, and careful governance of sensitive psychological data. Prior work on language models has shown that training data can be memorized or extracted, making privacy and data stewardship especially salient in mental-health settings \citep{carlini2021extracting,carlini2023quantifying}. Existing mental-health dialogue datasets and counseling benchmarks are useful for studying supportive language and counselor-client interaction, but they do not by themselves provide a stable inventory of reusable therapeutic actions.
+
+Retrieval-augmented and agentic LLM systems offer a complementary design. Instead of encoding all domain behavior into model weights, they retrieve external knowledge, documents, or tools before responding \citep{lewis2020rag,yao2023react,schick2023toolformer}. Comparative work on knowledge injection has also shown that retrieval can be preferable to fine-tuning when knowledge must remain updateable and externally controllable \citep{ouvadia2023finetuning}. Practitioner-facing mental-health copilots, however, require a different retrieval unit: the system needs to retrieve what kind of helping action may be appropriate, not only what text is relevant.
+
+We propose to make therapeutic skills an explicit intermediate layer for practitioner-facing copilots. In this paper, a skill is a compact, reusable therapeutic process unit that can help a system select and justify a bounded support action for clinician review. Skills are not diagnoses, treatment protocols, or final client-facing responses. They are operational representations of actions such as assessment and formulation, validation, psychoeducation, cognitive change, emotion regulation, behavioral planning, interpersonal work, exposure-related processing, and safety stabilization.
+
+We introduce TheraSkill, a large therapeutic skill library and evaluation framework for a Hermes-based practitioner copilot. TheraSkill converts dialogue-derived process knowledge into 52,070 skill cards, organizes them under a skill-type tree, and prepares them for use as an external action layer that Hermes can query through a narrow tool interface. The paper's central claim is infrastructural: practitioner-facing mental-health copilots need an auditable action layer between case input and final advice, explanation, or educational feedback. Benchmarking appears in this manuscript as a way to evaluate whether that action layer can be selected appropriately in realistic scenarios.
+
+This manuscript makes three contributions. First, it defines therapeutic skills as an auditable action layer for practitioner-facing mental-health copilots. Second, it describes a scalable construction pipeline that converts multi-source counseling and supportive dialogue into a 52,070-skill library with explicit categories, definitions, retrieval metadata, action rules, safety rules, and support counts. Third, it presents a Hermes-oriented runtime plan and scenario-based experimental protocol for evaluating skill selection, practitioner-facing explanation, simulation, and trainee feedback. The current version does not report final retrieval or deployed copilot results.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{direct_api_overview_v8.png}
+    \caption{\textbf{Overview of TheraSkill.} Dialogue cases are filtered, sampled, and converted into reusable process-rule candidates. Candidate skills are merged, deduplicated, and organized into a formal skill library. The library then supports Hermes-based practitioner skill selection, explanation, simulation, trainee feedback, and scenario-based evaluation.}
+    \label{fig:overview}
+\end{figure*}
+
+\section{Background: Therapeutic Skills as a Copilot Action Layer}
+
+Psychotherapy and counseling research has long emphasized process elements such as working alliance, formulation, psychoeducation, cognitive change, behavioral activation, emotion regulation, interpersonal work, exposure, and safety planning \citep{bordin1979alliance,lukens2004psychoeducation,beck1979cognitive,jacobson2001behavioral,gross1998emotion,klerman1984ipt,foa1986exposure,stanley2012safety}. These elements are not interchangeable response styles. They represent different helping functions, each with different timing, contraindications, and safety implications.
+
+LLM-based practitioner copilots need a representation that can preserve this functional distinction. A generic response generator may conflate validation, advice, psychoeducation, risk assessment, and problem-solving in one fluent paragraph. That mixture can be difficult to audit and difficult to improve. An explicit skill layer makes the action choice visible: before giving practitioner-facing guidance, the copilot can retrieve candidate skills, inspect safety gates, select compatible actions, and explain the basis for those choices.
+
+Parameter-centric adaptation is not sufficient for this role. Full fine-tuning is expensive, and even parameter-efficient methods such as low-rank adaptation were introduced partly because adapting large models directly is resource-intensive \citep{hu2022lora}. More importantly, model-specific adaptation can bind therapeutic behavior to a particular model family, weight release, or provider API. In practice, a Hermes-based copilot may operate across commercial and local LLM backends, while safety policies, escalation procedures, and supervision protocols may change faster than a full model-training cycle. A model-agnostic skill layer allows these therapeutic process units to be inspected, revised, versioned, and reused across different LLM providers.
+
+TheraSkill is therefore not framed as a clinical taxonomy or a replacement for professional case formulation. Its categories are retrieval-oriented action families designed for practitioner-copilot use. They help constrain merging, support retrieval, expose safety-relevant distinctions, and make downstream behavior more inspectable. This design is closer to an operational bridge between counseling process knowledge and copilot runtime than to a traditional psychotherapy coding manual.
+
+\section{Prior Work and Positioning}
+
+\paragraph{Digital mental-health agents and practitioner copilots.}
+Digital mental-health interventions and conversational agents have long been studied as scalable ways to deliver psychological support, including automated CBT-oriented agents such as Woebot and broader chatbot-based interventions \citep{fitzpatrick2017woebot,abdAlrazaq2020chatbots,he2023aiConversationalAgents}. These systems show the promise of accessible support while also underscoring the need for evidence, safety, engagement, and clinical boundary-setting. LLMs extend this line of work with more flexible language generation, and recent studies examine their use for mental-health education, supportive dialogue, counseling assistance, and competency evaluation \citep{stade2024opportunities,nguyen2025counselingbench}. However, most systems and evaluations still focus on final response quality, general competence, or symptom-oriented outcomes. TheraSkill instead targets the intermediate therapeutic action that a practitioner-facing copilot should retrieve, explain, and leave available for clinician review.
+
+\paragraph{Dialogue-data adaptation and its limits.}
+Mental-health dialogue corpora and LLM-augmented counseling datasets have become a major route for improving model behavior. SoulChatCorpus, SMILECHAT, CPsyCounD/CPsyCounE, and PsyDTCorpus show how supportive or counseling-style conversations can be collected, expanded, reconstructed, or used for model alignment \citep{chen2023soulchat,qiu2024smile,zhang2024cpsycoun,xie2025psydt}. These resources are valuable for training and evaluation, but they usually represent knowledge as dialogues, demonstrations, or model behavior. Fine-tuning and parameter-efficient adaptation can improve style and instruction following, but they leave therapeutic process knowledge difficult to inspect, costly to update, and often tied to a specific model family or provider \citep{hu2022lora}. Prior work also shows that language models may memorize or expose training data, which is especially relevant when psychological support data are sensitive \citep{carlini2021extracting,carlini2023quantifying}. TheraSkill uses dialogue-derived material differently: it externalizes reusable process knowledge into an auditable skill library.
+
+\paragraph{Therapeutic process knowledge as operational skill families.}
+Clinical and counseling research provides a long-standing vocabulary for therapeutic process, including alliance, formulation, psychoeducation, cognitive change, behavioral activation, emotion regulation, interpersonal intervention, exposure, and safety planning \citep{bordin1979alliance,lukens2004psychoeducation,beck1979cognitive,jacobson2001behavioral,gross1998emotion,klerman1984ipt,foa1986exposure,stanley2012safety}. These process elements are not interchangeable response styles; they differ in timing, goals, contraindications, and safety implications. TheraSkill uses this tradition to define broad operational action families, but it does not claim to reproduce a clinical coding manual or replace professional case formulation. Its categories are designed for copilot retrieval, safety inspection, skill-library maintenance, and scenario-based evaluation.
+
+\paragraph{Retrieval-augmented and agentic action selection.}
+Retrieval-augmented generation and agentic LLM systems keep external knowledge or tools available at inference time instead of encoding all behavior into model parameters \citep{lewis2020rag,yao2023react,schick2023toolformer}. Comparative work on knowledge injection further suggests that retrieval can be advantageous when knowledge must remain updateable and externally controllable \citep{ouvadia2023finetuning}. In practitioner-facing mental-health support, however, the key intermediate object is not only a document, fact, or tool. The system must identify which therapeutic process the clinician or trainee should consider. TheraSkill positions therapeutic skills as this model-agnostic action-selection layer, distinguishing it from passage-level RAG, coarse route classification, and final-response-only evaluation.
+
+\section{Methodology}
+
+\subsection{Overview}
+
+TheraSkill is a methodology for externalizing therapeutic process knowledge into a copilot-usable skill layer. The pipeline has four parts. First, dialogue-derived cases are filtered and sampled to create a source pool for process-rule extraction. Second, reusable therapeutic process rules are converted into a formal skill library with definitions, categories, retrieval metadata, action rules, safety rules, and a skill-type tree. Third, the library is exposed to a Hermes-based practitioner copilot through modules for query understanding, skill retrieval, bundle selection, explanation, simulation, trainee-feedback, and audit logging. Fourth, scenario-based evaluation items are constructed to test whether the copilot can select appropriate skills from both client-like and case-description inputs.
+
+The skill library is the central artifact, but the method is not only a library-construction procedure. It defines a complete route from dialogue-derived process knowledge to practitioner-facing action selection and evaluation. Each released skill card has a stable \texttt{skill\_id}, name, definition, category, skill-type node assignment, retrieval intents, retrieval tags, state rule, activation rule, execution rule, safety rule, support count, and trace metadata. The final release contains 52,070 skill cards, 2,245 skill-type tree nodes, and nine operational categories.
+
+\subsection{Creating the Skill Library}
+
+\paragraph{Source cases and pre-agent filtering.}
+We began from 332,605 dialogue cases aggregated from counseling and supportive-dialogue sources. The raw collection contained 277,440 cases from a unified counseling-dialogue file and 55,165 cases from a unified SMILECHAT file. The source composition included SoulChatCorpus, SMILECHAT, SoulChat-R1, PsyDTCorpus, CPsyCounD, and CPsyCounE \citep{chen2023soulchat,qiu2024smile,zhang2024cpsycoun,xie2025psydt}.
+
+We applied eligibility filters before skill extraction. A case required at least six turns, at least two client turns, at least two counselor turns, and a text length between 180 and 12,000 characters. System messages were excluded from scoring text. Previously used pilot, growth, and coverage cases were removed. Exact duplicates and severely role-imbalanced cases were also excluded. Eligible cases were ranked by a source-neutral score combining turn count, length, role balance, and coarse domain signal. We additionally used \texttt{bge-m3} embeddings for diversity sampling and redundancy control \citep{chen2024bgem3}. This stage selected 100,000 pre-agent cases.
+
+\paragraph{Process-rule extraction and quality adjudication.}
+For each selected case, the pipeline extracted a therapeutic process-rule candidate. A candidate represented a reusable action pattern rather than a final client-facing response. Each candidate was reviewed by an LLM-based quality adjudicator against the original dialogue, evidence mapping, safety interpretation, and suitability for offline skill-library construction.
+
+The adjudicator checked five dimensions: safety-gate appropriateness, high-risk primary-path handling, unsafe counselor-source reuse, evidence consistency, and reusable skill suitability. This process retained 99,515 process-rule skill candidates and rejected 205 candidates. The goal was not to validate treatment effectiveness, but to obtain a diverse pool of dialogue-derived process material suitable for constructing reusable skills.
+
+\paragraph{Operational skill categories.}
+The nine skill categories used in the formal release were not arbitrary labels. We first assigned the 99,515 retained process-rule candidates to retrieval-oriented skill types with an LLM under schema validation. The assignment prompt required the model to choose the primary therapeutic function of each skill, while also allowing secondary retrieval tags for cross-cutting content. This first pass produced complete assignments for all 99,515 candidates with zero missing source IDs and zero validation errors.
+
+The initial assignment schema included a tenth primary type for maintenance, generalization, and relapse prevention. A follow-up audit found that only 20 candidates used this as their primary type and that these cases were better represented by concrete primary actions such as psychoeducation, behavioral planning, cognitive change, or emotion regulation. We therefore removed maintenance/generalization from the primary type enum, reran those 20 assignments, and retained maintenance/generalization only as a retrieval tag. The resulting 9-way release became the category basis for downstream merging, tree induction, and experimental construction.
+
+The final categories cover assessment and formulation, engagement and validation, psychoeducation, cognitive change, emotion and somatic regulation, behavioral planning, interpersonal and systemic work, exposure and experiential processing, and safety or crisis stabilization. These families are aligned with recognizable therapeutic functions in the clinical and counseling literature \citep{bordin1979alliance,lukens2004psychoeducation,beck1979cognitive,jacobson2001behavioral,gross1998emotion,klerman1984ipt,foa1986exposure,stanley2012safety}, but their role in TheraSkill is pragmatic: they constrain merge boundaries, support retrieval metadata, and make the skill library auditable.
+
+\paragraph{Merge, deduplication, and skill-type tree construction.}
+The retained process-rule candidates were merged and deduplicated within compatible retrieval-oriented categories. The release path reduced 99,515 retained candidates to 52,070 formal skill cards after category-aware merge, deduplication, tree/name repair, and release packaging. This stage used category-compatible merge decisions, near-duplicate review, support aggregation, ID integrity checks, and checksum validation.
+
+A lightweight audit over the final release found no duplicate \texttt{skill\_id} groups. It also found 18 exact duplicate content groups covering 74 rows when excluding \texttt{skill\_id}; none of these duplicate IDs were referenced by the current scenario-evaluation answer keys. We record this as a minor release-cleanup issue for a future library version rather than a blocker for the current experimental plan.
+
+The final formal library contains 52,070 skills, 2,245 skill-type tree nodes, and nine skill categories. Every skill is assigned to a skill-type node. The skill-type tree is not intended as a clinical nosology. It is an organizational structure for retrieval, audit, scenario construction, practitioner guidance, simulation, and trainee feedback.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{formal_skill_library_detail_v10.png}
+    \caption{\textbf{Formal skill library construction.} Process-rule candidates are grouped by compatible category, merged and deduplicated, audited, and released as full skill cards linked to a skill-type tree.}
+    \label{fig:library-detail}
+\end{figure*}
+
+\begin{table}[t]
+    \centering
+    \small
+    \input{tables/release_summary.tex}
+    \caption{\textbf{Release-level summary.} Counts are taken from the formal skill-library and scenario-evaluation manifests.}
+    \label{tab:release-summary}
+\end{table}
+
+\begin{table*}[t]
+    \centering
+    \small
+    \input{tables/skill_category_distribution.tex}
+    \caption{\textbf{Skill category distribution.} The formal library is broad but unevenly distributed across operational therapeutic action categories.}
+    \label{tab:category-distribution}
+\end{table*}
+
+\subsection{Hermes-Based Practitioner Copilot Design}
+
+TheraSkill is intended to run as a domain backend for a Hermes-based practitioner copilot. Hermes provides the conversational agent runtime, model-provider switching, tool calling, session continuity, and deployment surfaces, while TheraSkill provides the domain-specific therapeutic action layer. We therefore avoid embedding therapeutic logic directly into the Hermes core. Instead, TheraSkill should be exposed through a narrow tool or MCP interface that lets Hermes request skill bundles, retrieve full skill cards, explain recommendations, run simulations, and evaluate trainee transcripts.
+
+The input is a natural-language client query, third-person case description, or trainee-patient transcript. The output is not only a generated practitioner-facing answer, but also an auditable intermediate record containing risk flags, retrieved skills, selected skill bundle, safety notes, fit reasons, and the fields of the skill cards used to justify the recommendation. This interface makes therapeutic action selection visible before the model produces final wording. The Hermes integration is still under development, so this subsection defines the intended architecture and evaluation hooks rather than reporting completed runtime results.
+
+\paragraph{Query understanding and risk screening.}
+The first module converts the input into a structured practitioner-support need. It identifies the presenting concern, relevant interpersonal or behavioral context, emotional state, clinician information needs, and possible high-risk cues. Safety-related cues should be handled before ordinary support actions, so this module provides the first gate for crisis, self-harm, violence, abuse, or other escalation-sensitive content. Its output is a compact state representation and a set of safety flags that condition later retrieval, explanation, and generation.
+
+\paragraph{Skill retrieval and reranking.}
+The second module retrieves candidate skills from the formal library. Candidate retrieval can use lexical matching, dense embeddings, hybrid retrieval, category metadata, retrieval intents, tags, and skill-type tree context. The goal is not only topical similarity but therapeutic action fit: the retrieved skill should match what the case suggests the practitioner should consider. Reranking therefore uses both semantic match and action constraints, including whether the skill is compatible with the detected state and safety flags.
+
+\paragraph{Skill bundle selection.}
+The third module selects a compatible bundle from retrieved candidates. A bundle may contain a primary skill and acceptable supporting skills, because realistic support scenarios often require several coordinated actions. Selection should account for scenario state, therapeutic function, safety gates, contraindications, and compatibility among skills. The selected bundle forms the copilot's explicit action plan for practitioner-facing guidance.
+
+\paragraph{Practitioner guidance, simulation, trainee feedback, and audit logging.}
+The final module conditions the LLM response on selected skills and safety constraints. In the practitioner-assistant setting, it produces case understanding, recommended skill bundle, fit reasons, next assessment questions, execution steps, contraindications, and escalation notes. In simulation, the same scenario state and selected skills can condition patient or practitioner role-play. In trainee evaluation, the module compares a dialogue transcript against expected key points, skill activation rules, execution rules, and safety rules. The runtime should log the input, retrieved skills, selected skills, safety flags, generated guidance, and validation outcomes. This record is essential for debugging, reviewer inspection, and later evaluation of whether the copilot followed the intended therapeutic action path.
+
+\subsection{Benchmark Construction}
+
+The benchmark is an experimental instrument for evaluating skill selection and downstream practitioner-facing guidance. It is not the paper's conceptual center, but it provides the main scenario set for testing whether a copilot can use the skill layer under realistic support conditions.
+
+Scenario construction used state and action structure as scaffolding. We first clustered state descriptions from the formal 52,070-skill library. The text view contained only \texttt{state\_rule}; activation and execution text were excluded from this stage. We embedded state text with \texttt{bge-m3} \citep{chen2024bgem3} and ran KMeans \citep{macqueen1967kmeans} with $k \in \{20,30,40\}$, random state 42, and 10 initializations. Silhouette values were used as diagnostics rather than gold criteria \citep{rousseeuw1987silhouettes}. We selected $k=20$ as the coarse state partition.
+
+State clusters were treated as construction scaffolds, not outcome labels. Because state-only clusters still mix intervention styles, we further clustered move-oriented text within selected state buckets. Move text combined skill category, therapeutic framework, activation rule, and execution rule while excluding state text. The full construction ran move clustering across 16 state clusters, producing 78 move cells and 42,934 skill move-cell assignments.
+
+Within each scenario cell, the construction process selected compatible groups of two to five skills. Compatibility required shared scenario state, complementary intervention goals, compatible safety gates, and no conflict in execution logic. An LLM then generated a scenario summary, natural query, key points, primary skill IDs, acceptable skill IDs, a full skill bundle, skill-fit reasons, and construction notes. Repair and review rounds constrained the model to original seed skill IDs or subsets, limited primary ground truth to one or two skills, and required primary and acceptable IDs to be subsets of the bundle.
+
+The released evaluation set contains 500 items, 500 answer-key rows, 500 construction-meta rows, 70 covered move cells, 1,390 unique ground-truth skills, and zero validation problems. Each scenario has two views: a first-person client query and a third-person case description. The first release shares ground-truth skill IDs between the two views. The case view intentionally avoids internal copilot language such as retrieval, skill recommendation, next-session wording, or treatment-plan phrasing.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{scenario_benchmark_construction_v1.png}
+    \caption{\textbf{Scenario-based evaluation construction.} State clustering and move clustering define scenario cells. Compatible skill bundles are used to generate realistic scenarios, two query views, hidden answer keys, and skill-fit reasons.}
+    \label{fig:scenario-evaluation}
+\end{figure*}
+
+\section{Experiments and Analysis}
+
+The empirical core of TheraSkill should evaluate copilot behavior, not only library size. We therefore organize the main-text experiments around two questions. First, can a system select appropriate therapeutic skill bundles from realistic client and case descriptions? Second, can a Hermes-based practitioner copilot use selected skills to produce safer, more inspectable, and more educational practitioner-facing guidance than direct LLM baselines? The benchmark described in Section 4.4 provides the shared item set for these experiments. Library construction quality, simulation behavior, trainee-feedback quality, and expert validity are important supporting analyses, but we treat them as secondary or appendix material unless their evidence becomes central after review.
+
+\subsection{Experiment 1: Scenario-Based Skill Selection for Practitioner Support}
+
+Experiment 1 evaluates whether a system can select appropriate skills from the TheraSkill library when given realistic client or case descriptions. The evaluation set contains 500 scenarios generated from the final skill library, with both first-person client queries and third-person case descriptions. It is built from skill bundles rather than broad route labels, because many realistic practitioner-support situations require several compatible actions.
+
+\textbf{Planned analysis.} We will compare lexical retrieval, dense retrieval, hybrid retrieval, and metadata-aware skill selection. The metadata-aware condition will use query understanding, risk flags, retrieval tags, categories, skill-type tree regions, and a whole-library fallback. The main practitioner-facing metrics will be primary-skill hit@K, acceptable-skill hit@K, bundle recall@K, key-point coverage@K, wrong-action rate@K, and safety-first recall@K for safety/crisis scenarios. Standard retrieval metrics such as Recall@K, MRR, and nDCG will be reported as secondary measures. These results are not yet available and should be inserted only after formal runs are completed.
+
+\subsection{Experiment 2: Skill-Guided Practitioner Guidance}
+
+Experiment 2 will evaluate whether selected skills improve practitioner-facing guidance. The Hermes-based copilot is still under development, so this section is a protocol placeholder. The planned runtime will retrieve candidate skills, inspect safety and action constraints, select a compatible skill bundle, and use the selected skills to condition a structured recommendation for the clinician or trainee.
+
+Candidate conditions include direct LLM practitioner advice, a static safety-prompt baseline, retrieval-conditioned guidance with TheraSkill skills, and a fuller Hermes runtime that exposes selected skills, safety handling, fit reasons, and next assessment questions. Evaluation should include human review of safety correctness, therapeutic appropriateness, usefulness for practitioner decision support, actionability, process coherence, risk escalation adequacy, unsupported diagnosis or medical advice, over-directiveness, and educational value for trainees. Machine review may be used as supplemental audit evidence, but it should not replace human evaluation.
+
+\textbf{Planned analysis.} Formal runtime results are not yet available. An older pilot completed 72 runtime calls across 24 prompts and three conditions, with machine review passing all 72 outputs and high-risk safety boundaries triggered in all 21 expected high-risk runs. Because this pilot used early reviewed cards rather than the final 52,070-skill library and current scenario evaluation set, it should be treated only as feasibility evidence.
+
+\subsection{Supporting Quality, Simulation, and Trainee-Evaluation Analyses}
+
+Additional analyses will be reported in the appendix or future work sections. The first is library construction quality, including schema validity, duplicate audits, category distribution, tree-assignment coverage, retrieval metadata completeness, safety-gate consistency, evidence-consistency checks, and sampled review of skill clarity and reusability. The second is expert validity and psychological credibility, including review of skill categories, skill-type tree samples, individual skill records, scenario ground-truth bundles, skill-fit reasons, and selected copilot outputs. The third is simulation and trainee education: patient simulation from scenario state and key points, practitioner-simulation exemplars, and transcript evaluation against expected key points, activation rules, execution rules, and safety rules. These analyses support the credibility and educational utility of the resource, but they do not by themselves establish clinical efficacy or deployment safety.
+
+\section{Discussion}
+
+TheraSkill reframes a core problem in practitioner-facing mental-health copilots: the system must identify a therapeutic action before it chooses final wording or advice. This distinction matters because many problematic suggestions are not simply badly written. They may enact the wrong support function, miss a safety boundary, or combine several actions without a clear rationale. An explicit skill layer makes this action choice visible and therefore more amenable to retrieval, audit, supervision, and evaluation.
+
+The library also provides a pragmatic bridge between dialogue data and copilot behavior. Dialogue corpora contain many examples of supportive interaction, but their knowledge is distributed across conversations. TheraSkill converts that material into reusable skill records with definitions, categories, retrieval metadata, support counts, safety gates, execution rules, and tree assignments. This makes the knowledge easier to inspect and easier to operationalize in a Hermes runtime.
+
+TheraSkill is not meant to replace all model adaptation. Fine-tuning may still improve language style, empathy, instruction following, and local response conventions. The distinction is where high-stakes therapeutic process knowledge should live. If this knowledge is only implicit in model parameters, changes to safety guidance, escalation procedures, supervision rubrics, or intervention boundaries may require retraining, provider-specific adaptation, or opaque prompt workarounds. If it is externalized into a skill layer, the same knowledge can be retrieved, inspected, revised, and connected to different Hermes-supported LLM backends without making every update a model-training problem.
+
+The scenario-based evaluation set is best understood as a test of action selection, not as the paper's primary scientific object. It asks whether a realistic client or case description can lead the system to the right skill bundle. This design reflects practitioner support more naturally than a one-query-one-label route task, because a scenario may require validation, clarification, emotion regulation, interpersonal work, and safety handling in combination.
+
+The current version of the manuscript remains a resource-and-methods paper. It supports claims about library construction, category organization, Hermes-oriented runtime design, and planned evaluation protocol. It does not yet support claims about improved clinical outcomes, real-world deployment safety, or final copilot performance. Those claims require completed retrieval experiments, human evaluation of practitioner-facing guidance, transcript-evaluation studies, and domain-expert review.
+
+\section{Conclusion}
+
+We introduced TheraSkill, a therapeutic skill library for practitioner-facing mental-health copilots. The formal release contains 52,070 skill cards organized into 2,245 skill-type nodes across nine operational action categories. The library is designed to make therapeutic action selection explicit, auditable, and usable by a Hermes-based runtime for practitioner assistance, simulation, and trainee feedback. The accompanying scenario-based evaluation set and planned copilot experiments will test whether selected skills can support better action selection and practitioner-facing guidance. Final retrieval and deployed runtime results remain placeholders for the next stage of the project.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
