@@ -44,8 +44,7 @@ Verified current counts from `data/skill_library/manifest.json` and `data/benchm
 - 2,245 skill-type tree nodes.
 - 9 skill categories.
 - 500 benchmark scenarios.
-- 500 client-view items.
-- 500 case-view items.
+- 500 scenario items in each legacy benchmark view.
 - 500 answer-key rows per view.
 
 Hermes target checkout:
@@ -178,11 +177,13 @@ Recommended output sections:
 
 1. Case understanding: concise formulation of presenting problem, context, goals, and uncertainty.
 2. Risk and safety check: high-risk cues, missing information, escalation triggers.
-3. Recommended skill bundle: primary and supporting skills with skill IDs.
-4. Why these skills fit: grounded in `activation_rule`, `state_rule`, and benchmark-style key points.
-5. How to use them: steps from `execution_rule.intervention_steps`.
+3. Recommended therapeutic focus: primary and supporting directions.
+4. Why the evidence fits: grounded in `activation_rule`, `state_rule`, and benchmark-style key points.
+5. How to use it: steps from `execution_rule.intervention_steps`.
 6. Avoid: contraindications and `must_not_do`.
 7. Suggested next clinician questions: assessment or clarification questions before intervention.
+
+Internal logs may retain reproducibility handles for debugging. User-facing physician notes, model-facing evaluation rubrics, and LLM-as-judge inputs should contain only the scenario, guidance, rubric, and redacted evidence text needed for evaluation.
 
 Boundary wording:
 
@@ -190,67 +191,157 @@ Boundary wording:
 - Avoid "diagnose", "treat", "guarantee", "the correct intervention is".
 - For crisis content, prioritize risk assessment, local emergency resources, and supervisor escalation.
 
-## Simulation Track
+## Scenario 1 Evaluation: Practitioner-Facing Clinical Assistant
 
-Simulation should be built after the practitioner assistant retrieval path is stable.
-
-### Patient simulator
-
-Inputs:
-
-- scenario summary;
-- expected key points;
-- state cluster / move cell;
-- selected or hidden target skills;
-- persona constraints;
-- risk state.
-
-Behavior:
-
-- answer trainee questions as the patient;
-- reveal information gradually;
-- maintain emotional and cognitive consistency;
-- avoid volunteering all key points at once;
-- trigger escalation behavior when high-risk cues are present.
-
-### Practitioner simulator
-
-Use mainly as a reference-response generator or training exemplar. It should be skill-guided, not free-form direct LLM counseling. Generated examples must be labeled as educational references, not clinical gold standards.
-
-## Trainee Evaluation Track
-
-The trainee-evaluation module should treat the skill library as a rubric source.
-
-Input:
+Treat both retrieval and generation as layers of the same practitioner-assistant scenario:
 
 ```text
-trainee-patient dialogue transcript
-optional case description
-optional supervisor notes
+case scenario
+  -> retrieve skill-card evidence
+  -> generate physician-facing guidance note
 ```
 
-Evaluation steps:
+### Layer A: evidence utility
 
-1. Extract patient state, goals, context, and risk cues.
-2. Retrieve expected skill bundle.
-3. Detect trainee moves in the transcript.
-4. Compare observed moves with expected key points and retrieved skill rules.
-5. Score strengths, omissions, contraindications, and safety handling.
-6. Produce educational feedback with concrete alternative wording.
+Object evaluated: retrieved skill-card evidence before final generation.
 
-Suggested rubric:
+Main metrics:
 
-- problem understanding;
-- empathy and validation;
-- clarification/formulation;
-- therapeutic action fit;
-- safety/risk assessment;
-- actionability;
-- boundary and ethics;
-- missed opportunities;
-- unsafe or over-directive statements.
+- Key-point coverage@K: whether the retrieved cards cover the hidden answer-key key points.
+- Safety evidence coverage@K: whether the retrieved cards contain required risk assessment, escalation, contraindication, or crisis-handling evidence when the scenario requires it.
 
-This track is especially relevant to the brain hospital data, but it requires strict de-identification, access control, and expert review before publication.
+Report only rubric-level evidence coverage for this layer: key-point coverage and safety evidence coverage. Internal construction metadata and non-release artifacts stay outside the reported metrics.
+
+### Layer B: physician-guidance quality
+
+Object evaluated: final physician-facing note.
+
+Primary evaluation method:
+
+- LLM-as-judge for scalable scoring.
+- Expert review for judge calibration, high-risk cases, and final claims.
+
+Judge-visible inputs:
+
+- patient or case scenario;
+- generated physician-facing note;
+- rubric derived from hidden key points, safety requirements, and must-avoid constraints;
+- optionally, redacted retrieved skill-card content for grounding checks.
+
+Judge input constraints:
+
+- no construction metadata;
+- no provenance traces;
+- redacted evidence text only when grounding checks require retrieved content.
+
+Main dimensions:
+
+- Clinical quality: fit to case and coherent practitioner-facing formulation.
+- Safety correctness: correct handling of risk, contraindications, escalation, and professional boundaries.
+- Actionability and educational usefulness: concrete next questions, usable intervention directions, and brief rationale.
+- Overreach flag: unsupported diagnosis, medication advice, treatment guarantees, or unsupported clinical claims.
+
+GT reference skills may be used internally to construct and audit key points, but model-facing and judge-facing inputs should only contain the scenario, rubric, generated output, and redacted evidence text.
+
+## Scenario 2 Evaluation: Training Simulation
+
+The second scenario is a training simulator. It is not evaluated as a retrieval task and should not reuse Scenario 1's evidence-coverage metrics. The evaluated object is the behavior of the simulator during a role-play session.
+
+Primary scope: patient simulation for trainee practice. Practitioner simulation can be reported as an optional exemplar-generation subtrack, but it should not be treated as a clinical gold standard.
+
+```text
+scenario + hidden patient state + rubric
+  -> trainee or scripted clinician turns
+  -> simulated patient turns
+  -> session-level evaluation
+```
+
+### Inputs
+
+Use the existing scenario set as the first source of cases. For each simulation item, prepare:
+
+- scenario summary;
+- patient state, affect, context, and goals;
+- expected key points that should be revealed when appropriately elicited;
+- information that should not be volunteered immediately;
+- risk state and escalation triggers;
+- persona constraints and communication style.
+
+### Main Metrics
+
+- Case fidelity: whether the simulated patient remains consistent with the assigned scenario, patient state, goals, and affect.
+- Progressive disclosure quality: whether key information is revealed when clinically appropriate questions are asked, without dumping all hidden key points at the start.
+- Interaction realism: whether turns sound like a plausible patient rather than a clinician, supervisor, or answer-key narrator.
+- Safety-trigger behavior: whether risk-related cues are revealed, maintained, and escalated consistently when the scripted or trainee interaction reaches safety-relevant content.
+- Controllability: whether the simulator follows the same case constraints across repeated runs and different trainee questioning styles.
+
+### Evaluation Protocol
+
+Use two complementary test sets:
+
+- Scripted probe sessions: fixed clinician-turn scripts covering rapport, clarification, direct risk questions, poor questions, and premature advice. These make simulator behavior comparable across systems.
+- Free role-play sessions: human or model trainee interactions used to test realism, robustness, and session flow.
+
+Primary scoring should use LLM-as-judge at the session level, with expert review on a stratified subset and all high-risk cases. The judge sees the scenario, hidden rubric, clinician turns, and simulator turns. Scores should be reported per metric above, plus a safety-failure rate for high-risk items.
+
+### Practitioner Exemplar Subtrack
+
+If we generate practitioner-side role-play examples, evaluate them as educational exemplars:
+
+- alignment with scenario key points and safety requirements;
+- clarity of therapeutic rationale;
+- appropriate professional boundaries;
+- usefulness as a teaching example.
+
+These examples should be labeled as training references, not ground truth clinical responses.
+
+## Scenario 3 Evaluation: Trainee Transcript Feedback
+
+The third scenario evaluates whether TheraSkill can review trainee-patient communication records and produce educational feedback. This is the closest fit for the brain hospital intern data, but real-data evaluation requires de-identification, access control, and expert annotation.
+
+```text
+de-identified trainee-patient transcript
+  -> retrieve rubric-relevant skill evidence
+  -> generate trainee feedback report
+  -> compare against expert educational review
+```
+
+### Inputs
+
+Each evaluation item should contain:
+
+- de-identified trainee-patient transcript;
+- optional case description or referral context;
+- expert rubric containing expected key points, safety requirements, missed opportunities, and must-avoid behaviors;
+- expert-written or expert-approved feedback notes for a subset used in calibration.
+
+### Output
+
+The system output should be an educational feedback report:
+
+1. brief case and interaction summary;
+2. trainee strengths grounded in transcript evidence;
+3. missed key points or insufficient exploration;
+4. safety and boundary concerns;
+5. concrete alternative phrasing;
+6. prioritized learning goals.
+
+### Main Metrics
+
+- Issue detection: precision, recall, and F1 against expert-labeled feedback points, evaluated at the level of rubric items rather than internal library fields.
+- Safety-gap detection: sensitivity to missed risk assessment, escalation needs, contraindications, and unsafe or over-directive statements. Severe misses should be reported separately as gating failures.
+- Feedback grounding: whether each critique or praise point is supported by transcript evidence.
+- Educational usefulness: whether the report gives specific, prioritized, non-punitive feedback and concrete alternative wording.
+- Overreach control: whether the system avoids unsupported diagnosis, moral judgment, medication advice, or claims not grounded in the transcript.
+
+### Evaluation Protocol
+
+Use a two-stage benchmark:
+
+- Synthetic-stress subset: generated or templated trainee transcripts from the 500 scenarios, with controlled omissions such as missed risk assessment, premature advice, weak validation, or failure to clarify goals. This subset supports repeatable testing because expected issues are known.
+- Expert-annotated real subset: de-identified intern transcripts reviewed by experienced clinicians or supervisors. This subset supports external validity and should be used for final claims.
+
+LLM-as-judge can score feedback grounding, educational usefulness, and overreach at scale. Expert review is required for safety-gap labels, final calibration, and any claim involving real trainee data. Report agreement between LLM judge and experts before relying on judge-only scores.
 
 ## Hermes Integration Options
 
@@ -304,14 +395,14 @@ Deliver:
 
 - `theraskill_agent/` package skeleton.
 - loader for `data/skill_library`.
-- `recommend_bundle(query)` returning skill IDs and reasons.
+- `recommend_bundle(query)` returning internal skill references plus redacted, physician-facing evidence summaries.
 - reproducible config under `configs/`.
 
 Validation:
 
-- run on 20 benchmark case-view items;
-- verify all returned skill IDs exist;
-- log latency and retrieval profile.
+- run on 20 practitioner-assistant benchmark scenarios;
+- verify all internal skill references resolve to current skill cards;
+- log latency, retrieval profile, and redaction status.
 
 ### M1: Practitioner assistant demo
 
@@ -324,20 +415,21 @@ Deliver:
 Validation:
 
 - run on 50 benchmark items;
-- report primary hit@10, bundle recall@10, key-point coverage, and safety notes.
+- report key-point coverage of retrieved evidence, safety evidence coverage, and qualitative safety notes.
 
 ### M2: Full benchmark run
 
 Deliver:
 
 - BM25, dense, hybrid, and metadata-aware profiles.
-- results for client and case views.
+- results for the practitioner-assistant scenario.
 - summary JSON and paper-ready table.
 
 Validation:
 
 - use fixed current Chinese library checksums;
-- separate exact skill-ID recall from key-point coverage.
+- report evidence key-point coverage and safety evidence coverage as retrieval-layer metrics;
+- report final physician-guidance quality with LLM-as-judge and expert calibration.
 
 ### M3: Trainee evaluation prototype
 
@@ -390,8 +482,9 @@ Avoid or qualify:
 
 ## Immediate Next Steps
 
-1. Revise `paper.tex` to foreground practitioner-facing Hermes integration.
-2. Keep Experiment 1 as scenario-based skill selection.
-3. Reframe Experiment 2 as practitioner-copilot response planning and explanation.
-4. Add trainee evaluation and simulation as extension applications, not current evidence.
-5. Implement the backend before touching Hermes core.
+1. Keep the paper framed around `Scenario 1: Practitioner-Facing Clinical Assistant`.
+2. Build the benchmark rubric around key points, safety requirements, and must-avoid constraints, with hidden reference skills used only for construction and audit.
+3. Implement the backend before touching Hermes core.
+4. Expose redacted skill-card evidence to the generation layer and keep reproducibility handles only in logs.
+5. Calibrate LLM-as-judge with expert review, especially for high-risk scenarios.
+6. Add trainee evaluation and simulation as extension applications, not current evidence.
